@@ -1,0 +1,69 @@
+name: Deploy Next.js to AWS EB
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EB_APPLICATION_NAME: ${{ vars.EB_APPLICATION_NAME }}
+  EB_ENVIRONMENT_NAME: ${{ vars.EB_ENVIRONMENT_NAME }}
+  S3_BUCKET: ${{ vars.S3_BUCKET }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js
+        run: npm run build
+
+      - name: Package for EB
+        run: |
+          rm -rf deploy
+          mkdir -p deploy/.next
+          cp -r .next/standalone deploy/.next/standalone
+          cp -r .next/static deploy/.next/static
+          cp Procfile deploy/Procfile
+          if [ -d public ]; then cp -r public deploy/public; fi
+          cd deploy && zip -r ../app-${GITHUB_SHA}.zip .
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload bundle to S3
+        run: |
+          VERSION_LABEL=nextjs-${GITHUB_SHA::8}-$(date +'%Y%m%d-%H%M%S')
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+          aws s3 cp app-${GITHUB_SHA}.zip s3://${S3_BUCKET}/${EB_APPLICATION_NAME}/${VERSION_LABEL}.zip
+
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${EB_APPLICATION_NAME}" \
+            --version-label "${VERSION_LABEL}" \
+            --source-bundle S3Bucket="${S3_BUCKET}",S3Key="${EB_APPLICATION_NAME}/${VERSION_LABEL}.zip"
+
+      - name: Deploy to EB environment
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${EB_ENVIRONMENT_NAME}" \
+            --version-label "${VERSION_LABEL}"
